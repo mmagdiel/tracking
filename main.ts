@@ -1,21 +1,45 @@
 /**
  * Webhook receptor para notificaciones Push Tracking de Coordinadora
  * Retransmite mensajes Pub/Sub a clientes WebSocket autenticados
- * 
- * Uso: node webhook_tracking.js
+ *
+ * Uso: npm start
  */
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+import http from 'http';
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import net from 'net';
+
+interface PubSubMessage {
+    message?: {
+        data: string;
+    };
+    [key: string]: unknown;
+}
+
+interface TrackingData {
+    tracking_number?: string;
+    comment?: string;
+    [key: string]: unknown;
+}
+
+interface LogRegistro {
+    fecha_recepcion: string;
+    ip_origen: string | string[] | undefined;
+    raw_body: string;
+    data_decodificada: TrackingData | null;
+    error: string | null;
+}
+
+type TokensClientes = Record<string, string>;
 
 const PORT = process.env.PORT || 3000;
-const CLIENT_ACCESS_TOKEN = 'gg8rY1c5Tcp1UhHqV0X2B5bSF4GcSKtwQerhLRQx4HhwhxHXiJPtRp3TDGVx'
+const CLIENT_ACCESS_TOKEN = 'gg8rY1c5Tcp1UhHqV0X2B5bSF4GcSKtwQerhLRQx4HhwhxHXiJPtRp3TDGVx';
 const LOG_FILE = path.join(__dirname, 'tracking_log.json');
 
 // Tokens por cliente: { cliente_id: token }
-const TOKENS_CLIENTES = {
+const TOKENS_CLIENTES: TokensClientes = {
     'cliente_1': CLIENT_ACCESS_TOKEN,
     // 'cliente_2': process.env.CLIENT_2_TOKEN,
     // Agrega más según necesites
@@ -33,11 +57,11 @@ if (Object.keys(TOKENS_CLIENTES).length === 0) {
 }
 
 // Clientes WebSocket conectados: Map<socket, cliente_id>
-const clientesWS = new Map();
+const clientesWS: Map<net.Socket, string> = new Map();
 
 // ================== UTILIDADES ==================
 
-function validarToken(token) {
+function validarToken(token: string | null): string | null {
     for (const [clienteId, clienteToken] of Object.entries(TOKENS_CLIENTES)) {
         if (clienteToken === token) {
             return clienteId;
@@ -46,39 +70,39 @@ function validarToken(token) {
     return null;
 }
 
-function leerLogs() {
+function leerLogs(): LogRegistro[] {
     try {
         if (fs.existsSync(LOG_FILE)) {
             return JSON.parse(fs.readFileSync(LOG_FILE, 'utf8'));
         }
     } catch (e) {
-        console.error('Error leyendo logs:', e.message);
+        console.error('Error leyendo logs:', (e as Error).message);
     }
     return [];
 }
 
-function guardarLogs(logs) {
+function guardarLogs(logs: LogRegistro[]): void {
     logs = logs.slice(0, 50);
     fs.writeFileSync(LOG_FILE, JSON.stringify(logs, null, 2));
 }
 
-function decodificarPubSub(rawBody) {
+function decodificarPubSub(rawBody: string): TrackingData | null {
     try {
-        const mensaje = JSON.parse(rawBody);
+        const mensaje: PubSubMessage = JSON.parse(rawBody);
 
         if (mensaje.message && mensaje.message.data) {
             const dataBase64 = mensaje.message.data;
             const dataJson = Buffer.from(dataBase64, 'base64').toString('utf8');
             return JSON.parse(dataJson);
         }
-        return mensaje;
+        return mensaje as TrackingData;
     } catch (e) {
         return null;
     }
 }
 
-function procesarNotificacion(rawBody, req) {
-    const registro = {
+function procesarNotificacion(rawBody: string, req: http.IncomingMessage): LogRegistro {
+    const registro: LogRegistro = {
         fecha_recepcion: new Date().toISOString(),
         ip_origen: req.headers['x-forwarded-for'] || req.socket.remoteAddress,
         raw_body: rawBody,
@@ -99,16 +123,16 @@ function procesarNotificacion(rawBody, req) {
 
 // ================== WEBSOCKET ==================
 
-function calcularAcceptKey(key) {
+function calcularAcceptKey(key: string): string {
     const GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
     return crypto.createHash('sha1').update(key + GUID).digest('base64');
 }
 
-function createWSFrame(message) {
+function createWSFrame(message: string): Buffer {
     const payload = Buffer.from(message);
     const length = payload.length;
-    
-    let frame;
+
+    let frame: Buffer;
     if (length < 126) {
         frame = Buffer.alloc(2 + length);
         frame[0] = 0x81;
@@ -127,32 +151,32 @@ function createWSFrame(message) {
         frame.writeBigUInt64BE(BigInt(length), 2);
         payload.copy(frame, 10);
     }
-    
+
     return frame;
 }
 
-function enviarACliente(socket, data) {
+function enviarACliente(socket: net.Socket, data: object): void {
     try {
         const frame = createWSFrame(JSON.stringify(data));
         socket.write(frame);
     } catch (e) {
-        console.error('Error enviando a cliente:', e.message);
+        console.error('Error enviando a cliente:', (e as Error).message);
     }
 }
 
-function broadcast(data) {
+function broadcast(data: object): void {
     clientesWS.forEach((clienteId, socket) => {
         enviarACliente(socket, data);
     });
 }
 
-function handleWebSocketUpgrade(req, socket) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
+function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket): void {
+    const url = new URL(req.url!, `http://${req.headers.host}`);
     const token = url.searchParams.get('token');
 
     // Validar token al conectar
     const clienteId = validarToken(token);
-    
+
     if (!clienteId) {
         console.log(`[WS] Conexión rechazada - Token inválido`);
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
@@ -163,7 +187,7 @@ function handleWebSocketUpgrade(req, socket) {
     console.log(`[WS] Cliente conectado: ${clienteId}`);
 
     // Completar handshake WebSocket
-    const key = req.headers['sec-websocket-key'];
+    const key = req.headers['sec-websocket-key']!;
     const acceptKey = calcularAcceptKey(key);
 
     socket.write(
@@ -189,7 +213,7 @@ function handleWebSocketUpgrade(req, socket) {
         clientesWS.delete(socket);
     });
 
-    socket.on('error', (err) => {
+    socket.on('error', (err: Error) => {
         console.error(`[WS] Error con ${clienteId}:`, err.message);
         clientesWS.delete(socket);
     });
@@ -197,12 +221,12 @@ function handleWebSocketUpgrade(req, socket) {
 
 // ================== HTML MONITOR ==================
 
-function generarHTML(host) {
+function generarHTML(host: string): string {
     const logs = leerLogs();
     const clientesConectados = Array.from(clientesWS.values());
-    
+
     let notificacionesHTML = '';
-    
+
     if (logs.length === 0) {
         notificacionesHTML = `
 Aun no se han recibido notificaciones.
@@ -211,7 +235,7 @@ Esperando que Coordinadora envie datos a este endpoint...
     } else {
         logs.forEach((log, index) => {
             let datosDecodificados = '  (No se pudo decodificar)\n';
-            
+
             if (log.data_decodificada) {
                 datosDecodificados = '';
                 for (const [campo, valor] of Object.entries(log.data_decodificada)) {
@@ -219,8 +243,8 @@ Esperando que Coordinadora envie datos a este endpoint...
                 }
             }
 
-            const rawTruncado = log.raw_body.length > 500 
-                ? log.raw_body.substring(0, 500) + '...(truncado)' 
+            const rawTruncado = log.raw_body.length > 500
+                ? log.raw_body.substring(0, 500) + '...(truncado)'
                 : log.raw_body;
 
             notificacionesHTML += `
@@ -275,16 +299,16 @@ const server = http.createServer((req, res) => {
 
     if (req.method === 'POST') {
         let body = '';
-        
-        req.on('data', chunk => {
+
+        req.on('data', (chunk: Buffer) => {
             body += chunk.toString();
         });
 
         req.on('end', () => {
             const registro = procesarNotificacion(body, req);
-            
+
             console.log(`[HTTP] Notificacion recibida de ${registro.ip_origen}`);
-            
+
             if (registro.data_decodificada) {
                 console.log('  Tracking:', registro.data_decodificada.tracking_number);
                 console.log('  Estado:', registro.data_decodificada.comment);
@@ -294,7 +318,7 @@ const server = http.createServer((req, res) => {
                     tipo: 'tracking',
                     data: registro.data_decodificada
                 });
-                
+
                 console.log(`  Enviado a ${clientesWS.size} cliente(s) WebSocket`);
             }
 
@@ -312,7 +336,7 @@ const server = http.createServer((req, res) => {
     }
 });
 
-server.on('upgrade', (req, socket, head) => {
+server.on('upgrade', (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     handleWebSocketUpgrade(req, socket);
 });
 

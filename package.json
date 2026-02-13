@@ -12,10 +12,14 @@
   },
   "license": "ISC",
   "author": "",
-  "type": "commonjs",
-  "main": "main.js",
+  "main": "dist/main.js",
   "scripts": {
-    "start": "node main.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsc --watch"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.0",
+    "@types/node": "^22.0.0"
   }
 }
