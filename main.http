@@ -3,3 +3,8 @@ GET http://localhost:3000
 ###
 
 wscat -c ws://localhost:3000/?token=gg8rY1c5Tcp1UhHqV0X2B5bSF4GcSKtwQerhLRQx4HhwhxHXiJPtRp3TDGVx
+
+###
+
+wscat -c ws://tracking.jobs-marquez-bros.com:3000/?token=gg8rY1c5Tcp1UhHqV0X2B5bSF4GcSKtwQerhLRQx4HhwhxHXiJPtRp3TDGVx
+

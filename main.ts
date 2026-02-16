@@ -90,11 +90,28 @@ function decodificarPubSub(rawBody: string): TrackingData | null {
     try {
         const mensaje: PubSubMessage = JSON.parse(rawBody);
 
-        if (mensaje.message && mensaje.message.data) {
-            const dataBase64 = mensaje.message.data;
-            const dataJson = Buffer.from(dataBase64, 'base64').toString('utf8');
-            return JSON.parse(dataJson);
+        const data = mensaje.message?.data;
+        if (typeof data === 'string' && data.length > 0) {
+            const base64Normalizada = data
+                .replace(/\s+/g, '')
+                .replace(/-/g, '+')
+                .replace(/_/g, '/');
+
+            const padding = base64Normalizada.length % 4;
+            const base64ConPadding = padding === 0
+                ? base64Normalizada
+                : base64Normalizada + '='.repeat(4 - padding);
+
+            const dataDecodificada = Buffer.from(base64ConPadding, 'base64').toString('utf8');
+            const dataSinBOM = dataDecodificada.replace(/^\uFEFF/, '');
+
+            try {
+                return JSON.parse(dataSinBOM);
+            } catch {
+                return { data: dataSinBOM } as unknown as TrackingData;
+            }
         }
+
         return mensaje as TrackingData;
     } catch (e) {
         return null;
