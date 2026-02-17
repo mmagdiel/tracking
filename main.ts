@@ -149,20 +149,34 @@ function normalizarHora(hora: string | undefined): string | null {
 }
 
 async function obtenerTrackingCode(trackingNumber: string): Promise<string | null> {
+    console.log('[DB] buscar trackingCode en orders. tracking_number=', trackingNumber);
     try {
         const query = 'SELECT trackingcode FROM orders WHERE tracking_number = $1 LIMIT 1';
         const result = await pgPool.query(query, [trackingNumber]);
         const value = result.rows[0]?.trackingcode;
+        console.log('[DB] orders lookup (trackingcode) rows=', result.rowCount);
         return typeof value === 'string' && value.trim() ? value.trim() : null;
-    } catch {
+    } catch (e) {
+        const err = e as any;
+        console.error('[DB] orders lookup fallo (trackingcode).', {
+            message: err?.message,
+            code: err?.code,
+            detail: err?.detail,
+            schema: err?.schema,
+            table: err?.table,
+            column: err?.column,
+            constraint: err?.constraint,
+        });
         const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
         const result = await pgPool.query(query, [trackingNumber]);
         const value = result.rows[0]?.trackingCode;
+        console.log('[DB] orders lookup ("trackingCode") rows=', result.rowCount);
         return typeof value === 'string' && value.trim() ? value.trim() : null;
     }
 }
 
 async function insertarTracking(data: TrackingData, trackingCode: string | null): Promise<void> {
+    console.log('[DB] insertar tracking. tracking_number=', data.tracking_number, 'trackingCode=', trackingCode);
     const query = `
 INSERT INTO tracking (
   trackingnumber,
@@ -191,7 +205,8 @@ INSERT INTO tracking (
         ? data.codigo
         : (typeof data.codigo === 'string' && data.codigo.trim() ? Number.parseInt(data.codigo.trim(), 10) : null);
 
-    await pgPool.query(query, [
+    try {
+        const result = await pgPool.query(query, [
         data.tracking_number ?? null,
         typeof data.referencia === 'string' ? data.referencia : null,
         typeof data.comment === 'string' ? data.comment : null,
@@ -207,7 +222,21 @@ INSERT INTO tracking (
         typeof data.vinculo_guia === 'string' ? data.vinculo_guia : null,
         typeof data.nombre_entrega === 'string' ? data.nombre_entrega : null,
         trackingCode,
-    ]);
+        ]);
+        console.log('[DB] insert tracking OK. rowCount=', result.rowCount);
+    } catch (e) {
+        const err = e as any;
+        console.error('[DB] insert tracking ERROR.', {
+            message: err?.message,
+            code: err?.code,
+            detail: err?.detail,
+            schema: err?.schema,
+            table: err?.table,
+            column: err?.column,
+            constraint: err?.constraint,
+        });
+        throw e;
+    }
 }
 
 function procesarNotificacion(rawBody: string, req: http.IncomingMessage): LogRegistro {
@@ -274,6 +303,7 @@ function enviarACliente(socket: net.Socket, data: object): void {
 }
 
 async function enviarEstadoInicial(socket: net.Socket): Promise<void> {
+    console.log('[DB] WS status: consultando tracking pendientes (comment != ENTREGADA)');
     const query = `
 SELECT
   comment,
@@ -286,7 +316,23 @@ WHERE comment IS DISTINCT FROM 'ENTREGADA'
 ORDER BY id DESC
 LIMIT 200`;
 
-    const result = await pgPool.query(query);
+    let result;
+    try {
+        result = await pgPool.query(query);
+        console.log('[DB] WS status: rows=', result.rowCount);
+    } catch (e) {
+        const err = e as any;
+        console.error('[DB] WS status query ERROR.', {
+            message: err?.message,
+            code: err?.code,
+            detail: err?.detail,
+            schema: err?.schema,
+            table: err?.table,
+            column: err?.column,
+            constraint: err?.constraint,
+        });
+        throw e;
+    }
     const records = result.rows.map(row => ({
         status: typeof row.comment === 'string' ? row.comment : null,
         trackingCode: typeof row.trackingcode === 'string' ? row.trackingcode : null,
