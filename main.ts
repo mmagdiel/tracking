@@ -262,10 +262,54 @@ function enviarACliente(socket: net.Socket, data: object): void {
     }
 }
 
+async function enviarEstadoInicial(socket: net.Socket): Promise<void> {
+    const query = `
+SELECT
+  comment,
+  trackingcode,
+  fecha,
+  hora,
+  nombreentrega
+FROM tracking
+WHERE comment IS DISTINCT FROM 'ENTREGADA'
+ORDER BY id DESC
+LIMIT 200`;
+
+    const result = await pgPool.query(query);
+    const records = result.rows.map(row => ({
+        status: typeof row.comment === 'string' ? row.comment : null,
+        trackingCode: typeof row.trackingcode === 'string' ? row.trackingcode : null,
+        date: row.fecha ? String(row.fecha).slice(0, 10) : null,
+        hour: row.hora ? String(row.hora) : null,
+        nameDelivery: typeof row.nombreentrega === 'string' ? row.nombreentrega : null,
+    }));
+
+    enviarACliente(socket, {
+        tipo: 'status',
+        data: records,
+    });
+}
+
 function broadcast(data: object): void {
     clientesWS.forEach((clienteId, socket) => {
         enviarACliente(socket, data);
     });
+}
+
+function mapearRespuesta(data: TrackingData, trackingCode: string | null): {
+    status: string | null;
+    trackingCode: string | null;
+    date: string | null;
+    hour: string | null;
+    nameDelivery: string | null;
+} {
+    return {
+        status: typeof data.comment === 'string' ? data.comment : null,
+        trackingCode,
+        date: typeof data.fecha === 'string' ? data.fecha : null,
+        hour: typeof data.hora === 'string' ? data.hora : null,
+        nameDelivery: typeof data.nombre_entrega === 'string' ? data.nombre_entrega : null,
+    };
 }
 
 function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket): void {
@@ -305,6 +349,14 @@ function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket): 
         mensaje: 'Conectado exitosamente',
         cliente: clienteId
     });
+
+    (async () => {
+        try {
+            await enviarEstadoInicial(socket);
+        } catch (e) {
+            console.error(`[WS] Error enviando estado inicial a ${clienteId}:`, (e as Error).message);
+        }
+    })();
 
     socket.on('close', () => {
         console.log(`[WS] Cliente desconectado: ${clienteId}`);
@@ -403,38 +455,56 @@ const server = http.createServer((req, res) => {
         });
 
         req.on('end', () => {
-            const registro = procesarNotificacion(body, req);
+            (async () => {
+                const registro = procesarNotificacion(body, req);
 
-            console.log(`[HTTP] Notificacion recibida de ${registro.ip_origen}`);
+                console.log(`[HTTP] Notificacion recibida de ${registro.ip_origen}`);
 
-            if (registro.data_decodificada) {
+                if (!registro.data_decodificada || esDecodedFallback(registro.data_decodificada)) {
+                    res.writeHead(400, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        status: null,
+                        trackingCode: null,
+                        date: null,
+                        hour: null,
+                        nameDelivery: null,
+                    }));
+                    return;
+                }
+
                 console.log('  Tracking:', registro.data_decodificada.tracking_number);
                 console.log('  Estado:', registro.data_decodificada.comment);
 
-                // Persistir en PostgreSQL solo si el payload es un objeto JSON real
-                // (evitar el fallback { data: "..." } cuando no se pudo parsear)
-                if (!esDecodedFallback(registro.data_decodificada) && registro.data_decodificada.tracking_number) {
-                    (async () => {
-                        try {
-                            const trackingCode = await obtenerTrackingCode(registro.data_decodificada!.tracking_number!);
-                            await insertarTracking(registro.data_decodificada!, trackingCode);
-                        } catch (e) {
-                            console.error('Error persistiendo tracking en DB:', (e as Error).message);
-                        }
-                    })();
+                try {
+                    const trackingNumber = registro.data_decodificada.tracking_number;
+                    const trackingCode = trackingNumber ? await obtenerTrackingCode(trackingNumber) : null;
+
+                    await insertarTracking(registro.data_decodificada, trackingCode);
+
+                    const payload = mapearRespuesta(registro.data_decodificada, trackingCode);
+
+                    // Retransmitir a clientes WebSocket SOLO despues de persistir
+                    broadcast({
+                        tipo: 'tracking',
+                        data: payload
+                    });
+
+                    console.log(`  Enviado a ${clientesWS.size} cliente(s) WebSocket`);
+
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify(payload));
+                } catch (e) {
+                    console.error('Error persistiendo tracking en DB:', (e as Error).message);
+                    res.writeHead(500, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({
+                        status: null,
+                        trackingCode: null,
+                        date: null,
+                        hour: null,
+                        nameDelivery: null,
+                    }));
                 }
-
-                // Retransmitir a clientes WebSocket
-                broadcast({
-                    tipo: 'tracking',
-                    data: registro.data_decodificada
-                });
-
-                console.log(`  Enviado a ${clientesWS.size} cliente(s) WebSocket`);
-            }
-
-            res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ status: 'ok', received: registro.fecha_recepcion }));
+            })();
         });
 
     } else if (req.method === 'GET') {
