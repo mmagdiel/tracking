@@ -18,7 +18,11 @@
     "start": "node dist/main.js",
     "dev": "tsc --watch"
   },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
   "devDependencies": {
+    "@types/pg": "^8.11.11",
     "typescript": "^5.7.0",
     "@types/node": "^22.0.0"
   }

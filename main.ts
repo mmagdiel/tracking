@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import net from 'net';
+import { Pool } from 'pg';
 
 interface PubSubMessage {
     message?: {
@@ -20,7 +21,19 @@ interface PubSubMessage {
 
 interface TrackingData {
     tracking_number?: string;
+    referencia?: string;
     comment?: string;
+    codigo?: number;
+    codigo_cliente?: string;
+    fecha?: string;
+    hora?: string;
+    anterior?: string;
+    referencia_anterior?: string;
+    nit_cliente?: string;
+    div_cliente?: string;
+    auxiliar?: string;
+    vinculo_guia?: string;
+    nombre_entrega?: string;
     [key: string]: unknown;
 }
 
@@ -37,6 +50,11 @@ type TokensClientes = Record<string, string>;
 const PORT = process.env.PORT || 3000;
 const CLIENT_ACCESS_TOKEN = 'gg8rY1c5Tcp1UhHqV0X2B5bSF4GcSKtwQerhLRQx4HhwhxHXiJPtRp3TDGVx';
 const LOG_FILE = path.join(__dirname, 'tracking_log.json');
+
+const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:mypassword@localhost:5432/postgres';
+const pgPool = new Pool({
+    connectionString: DATABASE_URL,
+});
 
 // Tokens por cliente: { cliente_id: token }
 const TOKENS_CLIENTES: TokensClientes = {
@@ -116,6 +134,69 @@ function decodificarPubSub(rawBody: string): TrackingData | null {
     } catch (e) {
         return null;
     }
+}
+
+function esDecodedFallback(data: TrackingData): boolean {
+    return typeof (data as unknown as { data?: unknown }).data === 'string' && Object.keys(data).length === 1;
+}
+
+function normalizarHora(hora: string | undefined): string | null {
+    if (!hora) return null;
+    const trimmed = hora.trim();
+    if (!trimmed) return null;
+    // Aceptar formatos como "13: 51: 43.456818" o "10:01:04.987708"
+    return trimmed.replace(/\s+/g, '');
+}
+
+async function obtenerTrackingCode(trackingNumber: string): Promise<string | null> {
+    const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
+    const result = await pgPool.query(query, [trackingNumber]);
+    const value = result.rows[0]?.trackingCode;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+async function insertarTracking(data: TrackingData, trackingCode: string | null): Promise<void> {
+    const query = `
+INSERT INTO tracking (
+  "trackingNumber",
+  "referencia",
+  "comment",
+  "codigo",
+  "codigoCliente",
+  "fecha",
+  "hora",
+  "anterior",
+  "referenciaAnterior",
+  "nitCliente",
+  "divCliente",
+  "auxiliar",
+  "vinculoGuia",
+  "nombreEntrega",
+  "trackingCode"
+) VALUES (
+  $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
+)`;
+
+    const fecha = typeof data.fecha === 'string' && data.fecha.trim() ? data.fecha.trim() : null;
+    const hora = normalizarHora(typeof data.hora === 'string' ? data.hora : undefined);
+
+    await pgPool.query(query, [
+        data.tracking_number ?? null,
+        typeof data.referencia === 'string' ? data.referencia : null,
+        typeof data.comment === 'string' ? data.comment : null,
+        typeof data.codigo === 'number' ? data.codigo : null,
+        typeof data.codigo_cliente === 'string' ? data.codigo_cliente : null,
+        fecha,
+        hora,
+        typeof data.anterior === 'string' ? data.anterior : null,
+        typeof data.referencia_anterior === 'string' ? data.referencia_anterior : null,
+        typeof data.nit_cliente === 'string' ? data.nit_cliente : null,
+        typeof data.div_cliente === 'string' ? data.div_cliente : null,
+        typeof data.auxiliar === 'string' ? data.auxiliar : null,
+        typeof data.vinculo_guia === 'string' ? data.vinculo_guia : null,
+        typeof data.nombre_entrega === 'string' ? data.nombre_entrega : null,
+        trackingCode,
+    ]);
 }
 
 function procesarNotificacion(rawBody: string, req: http.IncomingMessage): LogRegistro {
@@ -329,6 +410,19 @@ const server = http.createServer((req, res) => {
             if (registro.data_decodificada) {
                 console.log('  Tracking:', registro.data_decodificada.tracking_number);
                 console.log('  Estado:', registro.data_decodificada.comment);
+
+                // Persistir en PostgreSQL solo si el payload es un objeto JSON real
+                // (evitar el fallback { data: "..." } cuando no se pudo parsear)
+                if (!esDecodedFallback(registro.data_decodificada) && registro.data_decodificada.tracking_number) {
+                    (async () => {
+                        try {
+                            const trackingCode = await obtenerTrackingCode(registro.data_decodificada!.tracking_number!);
+                            await insertarTracking(registro.data_decodificada!, trackingCode);
+                        } catch (e) {
+                            console.error('Error persistiendo tracking en DB:', (e as Error).message);
+                        }
+                    })();
+                }
 
                 // Retransmitir a clientes WebSocket
                 broadcast({
