@@ -11,6 +11,7 @@ import path from 'path';
 import crypto from 'crypto';
 import net from 'net';
 import { Pool } from 'pg';
+import pino from 'pino';
 
 interface PubSubMessage {
     message?: {
@@ -55,6 +56,17 @@ const DATABASE_URL = process.env.DATABASE_URL || 'postgres://postgres:mypassword
 const pgPool = new Pool({
     connectionString: DATABASE_URL,
 });
+
+const logger = pino(
+    {
+        level: process.env.LOG_LEVEL || 'info',
+        redact: {
+            paths: ['req.headers.authorization', 'req.headers.cookie'],
+            remove: true,
+        },
+    },
+    pino.destination({ dest: path.join(__dirname, 'app.log'), sync: false })
+);
 
 // Tokens por cliente: { cliente_id: token }
 const TOKENS_CLIENTES: TokensClientes = {
@@ -149,16 +161,16 @@ function normalizarHora(hora: string | undefined): string | null {
 }
 
 async function obtenerTrackingCode(trackingNumber: string): Promise<string | null> {
-    console.log('[DB] buscar trackingCode en orders. tracking_number=', trackingNumber);
+    logger.info({ trackingNumber }, '[DB] buscar trackingCode en orders');
     try {
         const query = 'SELECT trackingcode FROM orders WHERE tracking_number = $1 LIMIT 1';
         const result = await pgPool.query(query, [trackingNumber]);
         const value = result.rows[0]?.trackingcode;
-        console.log('[DB] orders lookup (trackingcode) rows=', result.rowCount);
+        logger.info({ rowCount: result.rowCount }, '[DB] orders lookup (trackingcode)');
         return typeof value === 'string' && value.trim() ? value.trim() : null;
     } catch (e) {
         const err = e as any;
-        console.error('[DB] orders lookup fallo (trackingcode).', {
+        logger.error({
             message: err?.message,
             code: err?.code,
             detail: err?.detail,
@@ -166,17 +178,17 @@ async function obtenerTrackingCode(trackingNumber: string): Promise<string | nul
             table: err?.table,
             column: err?.column,
             constraint: err?.constraint,
-        });
+        }, '[DB] orders lookup fallo (trackingcode)');
         const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
         const result = await pgPool.query(query, [trackingNumber]);
         const value = result.rows[0]?.trackingCode;
-        console.log('[DB] orders lookup ("trackingCode") rows=', result.rowCount);
+        logger.info({ rowCount: result.rowCount }, '[DB] orders lookup ("trackingCode")');
         return typeof value === 'string' && value.trim() ? value.trim() : null;
     }
 }
 
 async function insertarTracking(data: TrackingData, trackingCode: string | null): Promise<void> {
-    console.log('[DB] insertar tracking. tracking_number=', data.tracking_number, 'trackingCode=', trackingCode);
+    logger.info({ trackingNumber: data.tracking_number, trackingCode }, '[DB] insertar tracking');
     const query = `
 INSERT INTO tracking (
   trackingnumber,
@@ -223,10 +235,10 @@ INSERT INTO tracking (
         typeof data.nombre_entrega === 'string' ? data.nombre_entrega : null,
         trackingCode,
         ]);
-        console.log('[DB] insert tracking OK. rowCount=', result.rowCount);
+        logger.info({ rowCount: result.rowCount }, '[DB] insert tracking OK');
     } catch (e) {
         const err = e as any;
-        console.error('[DB] insert tracking ERROR.', {
+        logger.error({
             message: err?.message,
             code: err?.code,
             detail: err?.detail,
@@ -234,7 +246,7 @@ INSERT INTO tracking (
             table: err?.table,
             column: err?.column,
             constraint: err?.constraint,
-        });
+        }, '[DB] insert tracking ERROR');
         throw e;
     }
 }
@@ -303,7 +315,7 @@ function enviarACliente(socket: net.Socket, data: object): void {
 }
 
 async function enviarEstadoInicial(socket: net.Socket): Promise<void> {
-    console.log('[DB] WS status: consultando tracking pendientes (comment != ENTREGADA)');
+    logger.info('[DB] WS status: consultando tracking pendientes (comment != ENTREGADA)');
     const query = `
 SELECT
   comment,
@@ -319,10 +331,10 @@ LIMIT 200`;
     let result;
     try {
         result = await pgPool.query(query);
-        console.log('[DB] WS status: rows=', result.rowCount);
+        logger.info({ rowCount: result.rowCount }, '[DB] WS status rows');
     } catch (e) {
         const err = e as any;
-        console.error('[DB] WS status query ERROR.', {
+        logger.error({
             message: err?.message,
             code: err?.code,
             detail: err?.detail,
@@ -330,7 +342,7 @@ LIMIT 200`;
             table: err?.table,
             column: err?.column,
             constraint: err?.constraint,
-        });
+        }, '[DB] WS status query ERROR');
         throw e;
     }
     const records = result.rows.map(row => ({
@@ -411,7 +423,7 @@ function handleWebSocketUpgrade(req: http.IncomingMessage, socket: net.Socket): 
         try {
             await enviarEstadoInicial(socket);
         } catch (e) {
-            console.error(`[WS] Error enviando estado inicial a ${clienteId}:`, (e as Error).message);
+            logger.error({ err: (e as Error).message, clienteId }, '[WS] Error enviando estado inicial');
         }
     })();
 
@@ -505,6 +517,17 @@ const server = http.createServer((req, res) => {
     const host = req.headers.host || 'tu-dominio.com';
 
     if (req.method === 'POST') {
+        const contentType = String(req.headers['content-type'] || '').toLowerCase();
+        const ipOrigen = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+        logger.info({ contentType, ipOrigen }, '[HTTP] POST recibido');
+
+        if (!contentType.startsWith('application/json')) {
+            // Evitar procesar multipart/form-data u otros payloads (ruido/ataques) como si fueran Pub/Sub
+            res.writeHead(415, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: 'Unsupported Media Type' }));
+            return;
+        }
+
         let body = '';
 
         req.on('data', (chunk: Buffer) => {
@@ -515,7 +538,7 @@ const server = http.createServer((req, res) => {
             (async () => {
                 const registro = procesarNotificacion(body, req);
 
-                console.log(`[HTTP] Notificacion recibida de ${registro.ip_origen}`);
+                logger.info({ ipOrigen: registro.ip_origen }, '[HTTP] Notificacion recibida');
 
                 if (!registro.data_decodificada || esDecodedFallback(registro.data_decodificada)) {
                     res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -551,7 +574,7 @@ const server = http.createServer((req, res) => {
                     res.writeHead(200, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify(payload));
                 } catch (e) {
-                    console.error('Error persistiendo tracking en DB:', (e as Error).message);
+                    logger.error({ err: (e as Error).message }, 'Error persistiendo tracking en DB');
                     res.writeHead(500, { 'Content-Type': 'application/json' });
                     res.end(JSON.stringify({
                         status: null,

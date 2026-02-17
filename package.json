@@ -19,7 +19,8 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "pino": "^9.4.0"
   },
   "devDependencies": {
     "@types/pg": "^8.11.11",
