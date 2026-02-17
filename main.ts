@@ -23,7 +23,7 @@ interface TrackingData {
     tracking_number?: string;
     referencia?: string;
     comment?: string;
-    codigo?: number;
+    codigo?: number | string;
     codigo_cliente?: string;
     fecha?: string;
     hora?: string;
@@ -149,30 +149,37 @@ function normalizarHora(hora: string | undefined): string | null {
 }
 
 async function obtenerTrackingCode(trackingNumber: string): Promise<string | null> {
-    const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
-    const result = await pgPool.query(query, [trackingNumber]);
-    const value = result.rows[0]?.trackingCode;
-    return typeof value === 'string' && value.trim() ? value.trim() : null;
+    try {
+        const query = 'SELECT trackingcode FROM orders WHERE tracking_number = $1 LIMIT 1';
+        const result = await pgPool.query(query, [trackingNumber]);
+        const value = result.rows[0]?.trackingcode;
+        return typeof value === 'string' && value.trim() ? value.trim() : null;
+    } catch {
+        const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
+        const result = await pgPool.query(query, [trackingNumber]);
+        const value = result.rows[0]?.trackingCode;
+        return typeof value === 'string' && value.trim() ? value.trim() : null;
+    }
 }
 
 async function insertarTracking(data: TrackingData, trackingCode: string | null): Promise<void> {
     const query = `
 INSERT INTO tracking (
-  "trackingNumber",
-  "referencia",
-  "comment",
-  "codigo",
-  "codigoCliente",
-  "fecha",
-  "hora",
-  "anterior",
-  "referenciaAnterior",
-  "nitCliente",
-  "divCliente",
-  "auxiliar",
-  "vinculoGuia",
-  "nombreEntrega",
-  "trackingCode"
+  trackingnumber,
+  referencia,
+  comment,
+  codigo,
+  codigocliente,
+  fecha,
+  hora,
+  anterior,
+  referenciaanterior,
+  nitcliente,
+  divcliente,
+  auxiliar,
+  vinculoguia,
+  nombreentrega,
+  trackingcode
 ) VALUES (
   $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15
 )`;
@@ -180,11 +187,15 @@ INSERT INTO tracking (
     const fecha = typeof data.fecha === 'string' && data.fecha.trim() ? data.fecha.trim() : null;
     const hora = normalizarHora(typeof data.hora === 'string' ? data.hora : undefined);
 
+    const codigo = typeof data.codigo === 'number'
+        ? data.codigo
+        : (typeof data.codigo === 'string' && data.codigo.trim() ? Number.parseInt(data.codigo.trim(), 10) : null);
+
     await pgPool.query(query, [
         data.tracking_number ?? null,
         typeof data.referencia === 'string' ? data.referencia : null,
         typeof data.comment === 'string' ? data.comment : null,
-        typeof data.codigo === 'number' ? data.codigo : null,
+        Number.isFinite(codigo as number) ? codigo : null,
         typeof data.codigo_cliente === 'string' ? data.codigo_cliente : null,
         fecha,
         hora,
