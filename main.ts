@@ -68,6 +68,89 @@ const logger = pino(
     pino.destination({ dest: path.join(__dirname, 'app.log'), sync: false })
 );
 
+const ORDERS_TABLE = process.env.ORDERS_TABLE || 'orders';
+const ORDERS_TRACKING_NUMBER_COLUMN = process.env.ORDERS_TRACKING_NUMBER_COLUMN || '';
+const ORDERS_TRACKING_CODE_COLUMN = process.env.ORDERS_TRACKING_CODE_COLUMN || '';
+
+let cachedOrdersColumns:
+    | { table: string; trackingNumberColumn: string; trackingCodeColumn: string }
+    | null = null;
+
+function quoteIdent(ident: string): string {
+    return '"' + ident.replace(/"/g, '""') + '"';
+}
+
+async function resolverColumnasOrders(): Promise<{ table: string; trackingNumberColumn: string; trackingCodeColumn: string } | null> {
+    if (cachedOrdersColumns) return cachedOrdersColumns;
+
+    if (ORDERS_TRACKING_NUMBER_COLUMN && ORDERS_TRACKING_CODE_COLUMN) {
+        cachedOrdersColumns = {
+            table: ORDERS_TABLE,
+            trackingNumberColumn: ORDERS_TRACKING_NUMBER_COLUMN,
+            trackingCodeColumn: ORDERS_TRACKING_CODE_COLUMN,
+        };
+        logger.info({ cachedOrdersColumns }, '[DB] orders columns configuradas por env');
+        return cachedOrdersColumns;
+    }
+
+    try {
+        const q = `
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = 'public' AND table_name = $1`;
+        const r = await pgPool.query(q, [ORDERS_TABLE]);
+        const cols: string[] = r.rows.map((x: any) => x.column_name).filter((x: unknown): x is string => typeof x === 'string');
+
+        logger.info({ table: ORDERS_TABLE, columns: cols }, '[DB] orders columns detectadas');
+
+        const norm = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const findBest = (candidates: string[]): string | null => {
+            for (const cand of candidates) {
+                const exact = cols.find(c => c === cand);
+                if (exact) return exact;
+            }
+            const normCols = cols.map(c => ({ c, n: norm(c) }));
+            for (const cand of candidates) {
+                const nc = norm(cand);
+                const found = normCols.find(x => x.n === nc);
+                if (found) return found.c;
+            }
+            return null;
+        };
+
+        const trackingNumberColumn = findBest([
+            'tracking_number',
+            'trackingnumber',
+            'trackingNumber',
+            'tracking',
+            'guia',
+            'numero_guia',
+            'numeroguia',
+        ]);
+
+        const trackingCodeColumn = findBest([
+            'trackingCode',
+            'tracking_code',
+            'trackingcode',
+            'code',
+            'codigo',
+        ]);
+
+        if (!trackingNumberColumn || !trackingCodeColumn) {
+            logger.error({ table: ORDERS_TABLE, trackingNumberColumn, trackingCodeColumn }, '[DB] No se pudieron resolver columnas de orders');
+            return null;
+        }
+
+        cachedOrdersColumns = { table: ORDERS_TABLE, trackingNumberColumn, trackingCodeColumn };
+        logger.info({ cachedOrdersColumns }, '[DB] orders columns resueltas');
+        return cachedOrdersColumns;
+    } catch (e) {
+        const err = e as any;
+        logger.error({ message: err?.message, code: err?.code }, '[DB] Error leyendo information_schema para orders');
+        return null;
+    }
+}
+
 // Tokens por cliente: { cliente_id: token }
 const TOKENS_CLIENTES: TokensClientes = {
     'cliente_1': CLIENT_ACCESS_TOKEN,
@@ -162,11 +245,21 @@ function normalizarHora(hora: string | undefined): string | null {
 
 async function obtenerTrackingCode(trackingNumber: string): Promise<string | null> {
     logger.info({ trackingNumber }, '[DB] buscar trackingCode en orders');
+    const resolved = await resolverColumnasOrders();
+    if (!resolved) {
+        logger.error({ table: ORDERS_TABLE }, '[DB] lookup trackingCode omitido: columnas orders desconocidas');
+        return null;
+    }
+
+    const query = `SELECT ${quoteIdent(resolved.trackingCodeColumn)} AS tracking_code
+FROM ${quoteIdent(resolved.table)}
+WHERE ${quoteIdent(resolved.trackingNumberColumn)} = $1
+LIMIT 1`;
+
     try {
-        const query = 'SELECT trackingcode FROM orders WHERE tracking_number = $1 LIMIT 1';
         const result = await pgPool.query(query, [trackingNumber]);
-        const value = result.rows[0]?.trackingcode;
-        logger.info({ rowCount: result.rowCount }, '[DB] orders lookup (trackingcode)');
+        const value = result.rows[0]?.tracking_code;
+        logger.info({ rowCount: result.rowCount }, '[DB] orders lookup (resuelto)');
         return typeof value === 'string' && value.trim() ? value.trim() : null;
     } catch (e) {
         const err = e as any;
@@ -178,12 +271,8 @@ async function obtenerTrackingCode(trackingNumber: string): Promise<string | nul
             table: err?.table,
             column: err?.column,
             constraint: err?.constraint,
-        }, '[DB] orders lookup fallo (trackingcode)');
-        const query = 'SELECT "trackingCode" FROM orders WHERE tracking_number = $1 LIMIT 1';
-        const result = await pgPool.query(query, [trackingNumber]);
-        const value = result.rows[0]?.trackingCode;
-        logger.info({ rowCount: result.rowCount }, '[DB] orders lookup ("trackingCode")');
-        return typeof value === 'string' && value.trim() ? value.trim() : null;
+        }, '[DB] orders lookup ERROR (resuelto)');
+        return null;
     }
 }
 
